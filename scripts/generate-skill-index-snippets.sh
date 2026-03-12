@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 
-# Generates a compressed (Vercel-style) skills index from plugin.json.
+# Generates a compressed (Vercel-style) skills index from the filesystem.
 # Output is written to stdout; redirect as needed.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
-PLUGIN_JSON="$REPO_ROOT/.claude-plugin/plugin.json"
+SKILLS_DIR="$REPO_ROOT/skills"
+RULES_DIR="$REPO_ROOT/.cursor/rules"
 README_PATH="$REPO_ROOT/README.md"
 
 UPDATE_README=false
@@ -15,18 +16,16 @@ if [[ "${1-}" == "--update-readme" ]]; then
   UPDATE_README=true
 fi
 
-skill_name_from_dir() {
-  local dir="$1"
-  local file="$REPO_ROOT/${dir#./}/SKILL.md"
+skill_name_from_file() {
+  local file="$1"
   [[ -f "$file" ]] || return 1
   grep -m1 '^name:' "$file" | sed 's/^name:[[:space:]]*//'
 }
 
-agent_name_from_path() {
-  local path="$1"
-  local file="$REPO_ROOT/${path#./}"
+rule_name_from_file() {
+  local file="$1"
   [[ -f "$file" ]] || return 1
-  grep -m1 '^name:' "$file" | sed 's/^name:[[:space:]]*//'
+  basename "$file" .mdc
 }
 
 declare -a akka=()
@@ -39,26 +38,36 @@ declare -a dotnet=()
 declare -a quality_gates=()
 declare -a meta=()
 
-while IFS= read -r skill_dir; do
-  name="$(skill_name_from_dir "$skill_dir")"
-  case "$skill_dir" in
-    ./skills/akka-*) akka+=("$name") ;;
-    ./skills/csharp-*) csharp+=("$name") ;;
-    ./skills/aspire-*|./skills/mjml-*) aspnetcore_web+=("$name") ;;
-    ./skills/efcore-*|./skills/database-*) data+=("$name") ;;
-    ./skills/microsoft-extensions-*) di_config+=("$name") ;;
-    ./skills/slopwatch|./skills/crap-analysis) quality_gates+=("$name") ;;
-    ./skills/testcontainers|./skills/playwright-*|./skills/snapshot-*|./skills/verify-*) testing+=("$name") ;;
-    ./skills/project-structure|./skills/local-tools|./skills/package-management|./skills/serialization|./skills/dotnet-devcert-*) dotnet+=("$name") ;;
-    ./skills/marketplace-*|./skills/skills-index-*) meta+=("$name") ;;
+# Discover skills by scanning the filesystem
+while IFS= read -r skill_file; do
+  [[ -f "$skill_file" ]] || continue
+  
+  skill_dir=$(dirname "$skill_file")
+  skill_folder=$(basename "$skill_dir")
+  name="$(skill_name_from_file "$skill_file")"
+  
+  case "$skill_folder" in
+    akka-*) akka+=("$name") ;;
+    csharp-*) csharp+=("$name") ;;
+    aspire-*|mjml-*) aspnetcore_web+=("$name") ;;
+    efcore-*|database-*) data+=("$name") ;;
+    microsoft-extensions-*) di_config+=("$name") ;;
+    slopwatch|crap-analysis) quality_gates+=("$name") ;;
+    testcontainers|playwright-*|snapshot-*|verify-*) testing+=("$name") ;;
+    project-structure|local-tools|package-management|serialization|dotnet-devcert-*|ilspy-*) dotnet+=("$name") ;;
+    skills-index-*) meta+=("$name") ;;
     *) ;; # ignore
   esac
-done < <(jq -r '.skills[]' "$PLUGIN_JSON")
+done < <(find "$SKILLS_DIR" -name "SKILL.md" 2>/dev/null)
 
-declare -a agents=()
-while IFS= read -r agent_path; do
-  agents+=("$(agent_name_from_path "$agent_path")")
-done < <(jq -r '.agents[]' "$PLUGIN_JSON")
+# Discover rules by scanning the filesystem
+declare -a rules=()
+if [ -d "$RULES_DIR" ]; then
+  while IFS= read -r rule_file; do
+    [[ -f "$rule_file" ]] || continue
+    rules+=("$(rule_name_from_file "$rule_file")")
+  done < <(find "$RULES_DIR" -name "*.mdc" 2>/dev/null)
+fi
 
 join_csv() {
   local IFS=','
@@ -78,7 +87,7 @@ compressed="$(cat <<EOF
 |dotnet:{$(join_csv "${dotnet[@]}")}
 |quality-gates:{$(join_csv "${quality_gates[@]}")}
 |meta:{$(join_csv "${meta[@]}")}
-|agents:{$(join_csv "${agents[@]}")}
+|rules:{$(join_csv "${rules[@]}")}
 EOF
 )"
 

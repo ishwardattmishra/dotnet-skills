@@ -1,6 +1,6 @@
 ---
-name: roslyn-incremental-generator-specialist
 description: Design and maintain Roslyn incremental source generators with strict pipeline discipline, parser vs emitter separation, and long-term maintainability for large generator suites.
+alwaysApply: false
 ---
 
 # Roslyn Incremental Generator Specialist

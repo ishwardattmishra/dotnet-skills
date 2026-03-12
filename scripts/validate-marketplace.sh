@@ -1,12 +1,12 @@
 #!/bin/bash
-# Validates that plugin.json is consistent with actual skill/agent files
+# Validates that the Cursor skills repository structure is consistent
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
-PLUGIN_JSON="$REPO_ROOT/.claude-plugin/plugin.json"
-MARKETPLACE_JSON="$REPO_ROOT/.claude-plugin/marketplace.json"
+SKILLS_DIR="$REPO_ROOT/skills"
+RULES_DIR="$REPO_ROOT/.cursor/rules"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -16,124 +16,94 @@ NC='\033[0m' # No Color
 errors=0
 warnings=0
 
-echo "Validating marketplace structure..."
+echo "Validating Cursor skills repository structure..."
 echo ""
 
-# Check JSON syntax
-if ! jq . "$MARKETPLACE_JSON" > /dev/null 2>&1; then
-    echo -e "${RED}ERROR: Invalid JSON syntax in marketplace.json${NC}"
+# Check skills directory exists
+if [ ! -d "$SKILLS_DIR" ]; then
+    echo -e "${RED}ERROR: Skills directory not found: $SKILLS_DIR${NC}"
     exit 1
 fi
-echo -e "${GREEN}marketplace.json syntax: OK${NC}"
 
-if ! jq . "$PLUGIN_JSON" > /dev/null 2>&1; then
-    echo -e "${RED}ERROR: Invalid JSON syntax in plugin.json${NC}"
-    exit 1
-fi
-echo -e "${GREEN}plugin.json syntax: OK${NC}"
-
-# Check skill references (now folders with SKILL.md)
-echo ""
+# Check skills
 echo "Checking skills..."
-while IFS= read -r source; do
-    # Remove leading ./ if present
-    clean_source="${source#./}"
-    file="$REPO_ROOT/${clean_source}/SKILL.md"
-
-    if [ ! -f "$file" ]; then
-        echo -e "${RED}ERROR: Missing SKILL.md for: $source${NC}"
-        echo -e "${RED}       Expected: $file${NC}"
-        ((++errors))
-    else
-        # Extract skill name from SKILL.md frontmatter
-        skill_name=$(grep "^name:" "$file" | head -1 | sed 's/^name: *//')
-        echo -e "${GREEN}OK: $skill_name ($source)${NC}"
+skill_count=0
+while IFS= read -r skill_file; do
+    if [ ! -f "$skill_file" ]; then
+        continue
     fi
-done < <(jq -r '.skills[]' "$PLUGIN_JSON")
+    
+    # Check YAML frontmatter
+    if ! head -1 "$skill_file" | grep -q "^---$"; then
+        echo -e "${RED}ERROR: Missing YAML frontmatter in $skill_file${NC}"
+        ((++errors))
+        continue
+    fi
+    
+    # Check for required fields
+    if ! grep -q "^name:" "$skill_file"; then
+        echo -e "${RED}ERROR: Missing 'name' field in $skill_file${NC}"
+        ((++errors))
+        continue
+    fi
+    
+    if ! grep -q "^description:" "$skill_file"; then
+        echo -e "${RED}ERROR: Missing 'description' field in $skill_file${NC}"
+        ((++errors))
+        continue
+    fi
+    
+    # Extract skill name
+    skill_name=$(grep -m1 "^name:" "$skill_file" | sed 's/^name:[[:space:]]*//')
+    echo -e "${GREEN}OK: $skill_name${NC}"
+    ((++skill_count))
+done < <(find "$SKILLS_DIR" -name "SKILL.md" 2>/dev/null)
 
-# Check agent references
+# Check rules if directory exists
 echo ""
-echo "Checking agents..."
-agents_value=$(jq -r '.agents' "$PLUGIN_JSON")
-agents_type=$(jq -r '.agents | type' "$PLUGIN_JSON")
-
-if [ "$agents_type" = "string" ]; then
-    # agents is a directory path
-    clean_dir="${agents_value#./}"
-    agents_dir="$REPO_ROOT/${clean_dir}"
-
-    if [ ! -d "$agents_dir" ]; then
-        echo -e "${RED}ERROR: Missing agents directory: $agents_dir${NC}"
-        ((++errors))
-    else
-        for file in "$agents_dir"/*.md; do
-            if [ -f "$file" ]; then
-                agent_name=$(grep "^name:" "$file" | head -1 | sed 's/^name: *//')
-                echo -e "${GREEN}OK: $agent_name${NC}"
-            fi
-        done
-    fi
-elif [ "$agents_type" = "array" ]; then
-    # agents is an array of paths (with .md extension)
-    while IFS= read -r source; do
-        # Remove leading ./ if present
-        clean_source="${source#./}"
-        file="$REPO_ROOT/${clean_source}"
-
-        if [ ! -f "$file" ]; then
-            echo -e "${RED}ERROR: Missing agent file: $file${NC}"
+echo "Checking Cursor rules..."
+rule_count=0
+if [ -d "$RULES_DIR" ]; then
+    while IFS= read -r rule_file; do
+        if [ ! -f "$rule_file" ]; then
+            continue
+        fi
+        
+        # Check YAML frontmatter
+        if ! head -1 "$rule_file" | grep -q "^---$"; then
+            echo -e "${RED}ERROR: Missing YAML frontmatter in $rule_file${NC}"
             ((++errors))
-        else
-            agent_name=$(grep "^name:" "$file" | head -1 | sed 's/^name: *//')
-            echo -e "${GREEN}OK: $agent_name${NC}"
+            continue
         fi
-    done < <(jq -r '.agents[]' "$PLUGIN_JSON")
-fi
-
-# Check for unregistered skills (find all SKILL.md files)
-echo ""
-echo "Checking for unregistered skills..."
-while IFS= read -r file; do
-    # Get the directory containing SKILL.md relative to repo root
-    skill_dir=$(dirname "$file" | sed "s|$REPO_ROOT/||")
-    source="./$skill_dir"
-
-    if ! jq -e --arg src "$source" '.skills[] | select(. == $src)' "$PLUGIN_JSON" > /dev/null 2>&1; then
-        echo -e "${YELLOW}WARNING: Skill not in plugin.json: $source${NC}"
-        ((++warnings))
-    fi
-done < <(find "$REPO_ROOT/skills" -name "SKILL.md" 2>/dev/null)
-
-# Check for unregistered agents
-echo ""
-echo "Checking for unregistered agents..."
-if [ "$agents_type" = "string" ]; then
-    # When agents is a directory, all .md files in that directory are automatically included
-    echo -e "${GREEN}Using directory mode: all agents in ${agents_value} are included${NC}"
-elif [ "$agents_type" = "array" ]; then
-    for file in "$REPO_ROOT"/agents/*.md; do
-        if [ -f "$file" ]; then
-            basename=$(basename "$file")
-            source="./agents/$basename"
-            if ! jq -e --arg src "$source" '.agents[] | select(. == $src)' "$PLUGIN_JSON" > /dev/null 2>&1; then
-                echo -e "${YELLOW}WARNING: Agent file not in plugin.json: $basename${NC}"
-                ((++warnings))
-            fi
+        
+        # Check for required fields
+        if ! grep -q "^description:" "$rule_file"; then
+            echo -e "${RED}ERROR: Missing 'description' field in $rule_file${NC}"
+            ((++errors))
+            continue
         fi
-    done
+        
+        if ! grep -q "^alwaysApply:" "$rule_file"; then
+            echo -e "${RED}ERROR: Missing 'alwaysApply' field in $rule_file${NC}"
+            ((++errors))
+            continue
+        fi
+        
+        # Extract rule name from filename
+        rule_name=$(basename "$rule_file" .mdc)
+        echo -e "${GREEN}OK: $rule_name${NC}"
+        ((++rule_count))
+    done < <(find "$RULES_DIR" -name "*.mdc" 2>/dev/null)
+else
+    echo -e "${YELLOW}WARNING: No .cursor/rules/ directory found${NC}"
+    ((++warnings))
 fi
 
 # Summary
 echo ""
 echo "=== Summary ==="
-echo "Skills registered: $(jq '.skills | length' "$PLUGIN_JSON")"
-if [ "$agents_type" = "string" ]; then
-    agents_count=$(find "$agents_dir" -name "*.md" 2>/dev/null | wc -l)
-    echo "Agents registered: $agents_count (directory mode: $agents_value)"
-else
-    echo "Agents registered: $(jq '.agents | length' "$PLUGIN_JSON")"
-fi
-echo "Plugin version: $(jq -r '.version' "$PLUGIN_JSON")"
+echo "Skills found: $skill_count"
+echo "Rules found: $rule_count"
 
 if [ $errors -gt 0 ]; then
     echo -e "${RED}Errors: $errors${NC}"
